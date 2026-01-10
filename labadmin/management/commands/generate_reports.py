@@ -20,8 +20,8 @@ class Command(BaseCommand):
         parser.add_argument(
             '--type',
             type=str,
-            choices=['week', 'month', 'year'],
-            help='报表类型：week（周报表）、month（月报表）、year（年报表）',
+            choices=['week', 'month', 'year', 'custom'],
+            help='报表类型：week（周报表）、month（月报表）、year（年报表）、custom（自定义时间段）',
         )
         parser.add_argument(
             '--date',
@@ -40,35 +40,41 @@ class Command(BaseCommand):
         auto = options.get('auto', False)
         
         if auto:
-            # 自动生成模式
+            # 自动生成模式：只在需要的时候生成
             today = timezone.now().date()
             
-            # 生成上周报表
-            last_week_start = today - timedelta(days=today.weekday() + 7)
-            last_week_end = last_week_start + timedelta(days=6)
-            self.generate_week_report(last_week_start, last_week_end)
+            # 周报表：每周一生成上一周报表
+            if today.weekday() == 0:  # 周一
+                last_week_start = today - timedelta(days=7)
+                last_week_end = last_week_start + timedelta(days=6)
+                self.generate_week_report(last_week_start, last_week_end)
+                self.stdout.write(self.style.SUCCESS(f'已生成上周周报表：{last_week_start} 至 {last_week_end}'))
             
-            # 生成上月报表
-            if today.month == 1:
-                last_month = 12
+            # 月报表：每月1号生成上一月报表
+            if today.day == 1:  # 每月1号
+                if today.month == 1:
+                    last_month = 12
+                    last_year = today.year - 1
+                else:
+                    last_month = today.month - 1
+                    last_year = today.year
+                last_month_start = date(last_year, last_month, 1)
+                if last_month == 12:
+                    last_month_end = date(last_year + 1, 1, 1) - timedelta(days=1)
+                else:
+                    last_month_end = date(last_year, last_month + 1, 1) - timedelta(days=1)
+                self.generate_month_report(last_year, last_month, last_month_start, last_month_end)
+                self.stdout.write(self.style.SUCCESS(f'已生成上月月报表：{last_year}年{last_month:02d}月'))
+            
+            # 年报表：每年1月1号生成上一年报表
+            if today.month == 1 and today.day == 1:  # 每年1月1号
                 last_year = today.year - 1
-            else:
-                last_month = today.month - 1
-                last_year = today.year
-            last_month_start = date(last_year, last_month, 1)
-            if last_month == 12:
-                last_month_end = date(last_year + 1, 1, 1) - timedelta(days=1)
-            else:
-                last_month_end = date(last_year, last_month + 1, 1) - timedelta(days=1)
-            self.generate_month_report(last_year, last_month, last_month_start, last_month_end)
+                last_year_start = date(last_year, 1, 1)
+                last_year_end = date(last_year, 12, 31)
+                self.generate_year_report(last_year, last_year_start, last_year_end)
+                self.stdout.write(self.style.SUCCESS(f'已生成去年年报表：{last_year}年'))
             
-            # 生成去年报表
-            last_year = today.year - 1
-            last_year_start = date(last_year, 1, 1)
-            last_year_end = date(last_year, 12, 31)
-            self.generate_year_report(last_year, last_year_start, last_year_end)
-            
-            self.stdout.write(self.style.SUCCESS('自动生成报表完成！'))
+            self.stdout.write(self.style.SUCCESS('自动生成报表检查完成！'))
         else:
             # 手动指定模式
             if not report_type or not date_input:

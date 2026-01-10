@@ -10,6 +10,7 @@ class Report(models.Model):
         ('week', '周报表'),
         ('month', '月报表'),
         ('year', '年报表'),
+        ('custom', '自定义时间段报表'),
     )
     
     report_type = models.CharField(max_length=10, choices=REPORT_TYPE_CHOICES, verbose_name='报表类型')

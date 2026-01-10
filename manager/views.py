@@ -104,9 +104,16 @@ def manager_report_stat(request):
     # 处理报表生成请求
     if request.method == 'POST' and 'generate' in request.POST:
         report_type = request.POST.get('report_type')
-        date_input = request.POST.get('date_input')
+        date_input = request.POST.get('date_input', '').strip()
+        start_date_input = request.POST.get('start_date', '').strip()
+        end_date_input = request.POST.get('end_date', '').strip()
         
-        if not report_type or not date_input:
+        # 自定义时间段报表需要起始日期和结束日期
+        if report_type == 'custom':
+            if not start_date_input or not end_date_input:
+                messages.error(request, '自定义时间段报表需要填写起始日期和结束日期！')
+                return redirect('manager_report_stat')
+        elif not date_input:
             messages.error(request, '请选择报表类型和日期！')
             return redirect('manager_report_stat')
         
@@ -139,20 +146,35 @@ def manager_report_stat(request):
                 start_date = date(year, 1, 1)
                 end_date = date(year, 12, 31)
                 report_name = f"{year}年报表"
+            elif report_type == 'custom':
+                # 自定义时间段报表：使用用户指定的起始日期和结束日期
+                start_date = datetime.strptime(start_date_input, '%Y-%m-%d').date()
+                end_date = datetime.strptime(end_date_input, '%Y-%m-%d').date()
+                
+                # 验证日期范围
+                if start_date > end_date:
+                    messages.error(request, '起始日期不能晚于结束日期！')
+                    return redirect('manager_report_stat')
+                
+                report_name = f"{start_date.strftime('%Y年%m月%d日')} 至 {end_date.strftime('%Y年%m月%d日')} 自定义报表"
             else:
                 messages.error(request, '无效的报表类型！')
                 return redirect('manager_report_stat')
             
-            # 检查是否已存在相同报表
-            existing_report = Report.objects.filter(
-                report_type=report_type,
-                start_date=start_date,
-                end_date=end_date
-            ).first()
-            
-            if existing_report:
-                messages.info(request, f'该时间段报表已存在，已为您加载：{existing_report.report_name}')
-                return redirect('manager_report_stat')
+            # 检查是否已存在相同报表（只检查相同类型的，自定义报表可以重复生成）
+            if report_type != 'custom':
+                existing_report = Report.objects.filter(
+                    report_type=report_type,
+                    start_date=start_date,
+                    end_date=end_date
+                ).first()
+                
+                if existing_report:
+                    if existing_report.generated_by:
+                        messages.info(request, f'该时间段报表已存在（手动生成），已为您加载：{existing_report.report_name}')
+                    else:
+                        messages.info(request, f'该时间段报表已存在（系统自动生成），已为您加载：{existing_report.report_name}')
+                    return redirect(f'manager_report_stat?view={existing_report.id}')
             
             # 生成报表数据
             report_data = generate_report_data(report_type, start_date, end_date)
@@ -172,8 +194,11 @@ def manager_report_stat(request):
             )
             
             messages.success(request, f'报表生成成功：{report_name}')
-            return redirect('manager_report_stat')
+            return redirect(f'manager_report_stat?view={report.id}')
             
+        except ValueError as e:
+            messages.error(request, f'日期格式错误：请检查日期格式是否正确！')
+            return redirect('manager_report_stat')
         except Exception as e:
             messages.error(request, f'生成报表失败：{str(e)}')
             return redirect('manager_report_stat')
