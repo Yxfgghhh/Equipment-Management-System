@@ -81,8 +81,29 @@ def booking_approve(request):
     }
     return render(request, 'manager/booking_approve.html', context)
 
+@login_required
 def manager_report_stat(request):
-    return render(request, 'manager/report_stat.html')
+    """负责人报表统计页面（只能查看，不能生成）"""
+    from labadmin.models import Report
+    
+    # 获取已生成的报表列表
+    reports = Report.objects.all().order_by('-generated_at')[:20]
+    
+    # 查看报表详情
+    report_id = request.GET.get('view')
+    current_report = None
+    if report_id:
+        try:
+            current_report = Report.objects.get(id=report_id)
+        except Report.DoesNotExist:
+            from django.contrib import messages
+            messages.error(request, '报表不存在！')
+    
+    context = {
+        'reports': reports,
+        'current_report': current_report,
+    }
+    return render(request, 'manager/report_stat.html', context)
 
 # -----------------------s--- 1. 用户列表（含搜索、筛选） --------------------------
 def user_manage(request):
