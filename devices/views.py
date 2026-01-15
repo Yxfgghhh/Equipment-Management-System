@@ -3,6 +3,17 @@ from django.db.models import Q
 from django.contrib import messages  # 新增：用于提示操作结果
 from .models import Device
 from .forms import DeviceForm
+from ledger.models import DeviceLedger
+from django.utils import timezone
+
+def get_user_role_context(request):
+    """辅助函数：获取用户角色信息"""
+    is_admin = request.user.groups.filter(name='设备管理员').exists()
+    is_manager = request.user.groups.filter(name='实验室负责人').exists()
+    return {
+        'is_admin': is_admin,
+        'is_manager': is_manager,
+    }
 
 def device_manage(request):
     """
@@ -53,10 +64,13 @@ def device_manage(request):
     if status_action and pk:
         device = get_object_or_404(Device, pk=pk)
         if status_action == 'available':
-            device.status = '可用'
+            # 如果是从不可用改为可用，创建归还记录
+            if device.status == 'unavailable':
+                create_return_ledger(device, request.user)
+            device.status = 'available'
             msg = f"设备【{device.device_code}】已标记为可用！"
         elif status_action == 'unavailable':
-            device.status = '不可用'
+            device.status = 'unavailable'
             msg = f"设备【{device.device_code}】已标记为不可用！"
         device.save()
         messages.success(request, msg)
@@ -76,6 +90,7 @@ def device_manage(request):
         'form': form,
         'edit_device_id_js': edit_device_id,  # 传给模板标识编辑状态
     }
+    context.update(get_user_role_context(request))
     return render(request, 'admin/device_manage.html', context)
 
 def device_delete(request, pk):
@@ -119,6 +134,42 @@ def device_detail(request, pk):
         'device': device,
         'form': form,
     }
+    context.update(get_user_role_context(request))
 
     # 渲染设备详情/编辑模板
     return render(request, 'admin/device_detail.html', context)
+
+def create_return_ledger(device, operator):
+    """创建设备归还台账记录"""
+    try:
+        # 查找最近的借出记录（未归还的）
+        borrow_ledger = DeviceLedger.objects.filter(
+            device=device,
+            operation_type='borrow',
+            actual_return_date__isnull=True
+        ).order_by('-operation_date').first()
+        
+        if borrow_ledger:
+            # 创建归还记录
+            DeviceLedger.objects.create(
+                device=device,
+                device_name=device.model,
+                user=borrow_ledger.user,
+                operation_type='return',
+                operation_date=timezone.now(),
+                actual_return_date=timezone.now(),
+                status_after_operation='available',
+                description=f'设备归还 - 操作员：{operator.username}',
+                operator=operator
+            )
+            
+            # 更新借出记录的实际归还时间
+            borrow_ledger.actual_return_date = timezone.now()
+            borrow_ledger.save()
+            
+            print(f'已为设备 {device.device_code} 创建归还台账记录')
+        else:
+            print(f'未找到设备 {device.device_code} 的借出记录')
+            
+    except Exception as e:
+        print(f'创建归还台账记录失败：{str(e)}')
