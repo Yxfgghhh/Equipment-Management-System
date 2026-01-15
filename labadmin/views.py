@@ -107,17 +107,29 @@ def generate_report_data(report_type, start_date, end_date):
     # 获取已审批通过的预约
     approved_bookings = bookings.filter(status='manager_approved')
     
-    # 基础统计
+    # 基础统计 (已修正：包含 teacher_pending 和 teacher_rejected)
     total_bookings = bookings.count()
     approved_count = approved_bookings.count()
-    rejected_count = bookings.filter(Q(status='admin_rejected') | Q(status='manager_rejected')).count()
-    pending_count = bookings.filter(status='pending').count()
+    # 拒绝总数 = 指导教师拒绝 + 管理员拒绝 + 负责人拒绝
+    rejected_count = bookings.filter(
+        Q(status='teacher_rejected') | Q(status='admin_rejected') | Q(status='manager_rejected')
+    ).count()
+    # 待处理总数 = 待指导教师审 + 待管理员审
+    pending_count = bookings.filter(
+        Q(status='teacher_pending') | Q(status='pending')
+    ).count()
     
     # 按设备统计
-    device_stats = approved_bookings.values('device__device_code', 'device__model').annotate(
+    device_stats_queryset = approved_bookings.values('device__device_code', 'device__model').annotate(
         booking_count=Count('id'),
         revenue=Sum('device__price_external')
     ).order_by('-booking_count')
+    
+    # 【核心修复】：遍历列表，转换内部字典里的 Decimal 为 float
+    device_stats = []
+    for item in device_stats_queryset:
+        item['revenue'] = float(item['revenue'] or 0)
+        device_stats.append(item)
     
     # 按用户类型统计
     user_type_stats = approved_bookings.values('applicant__user_type').annotate(
@@ -146,8 +158,13 @@ def generate_report_data(report_type, start_date, end_date):
         usage_hours = booking_count * 2
         # 计算使用率（假设每天可用8小时）
         days = (end_date - start_date).days + 1
-        total_hours = days * 8
-        usage_rate = (usage_hours / total_hours * 100) if total_hours > 0 else 0
+        total_hours = max(days * 8, 1) # 防止除以0
+        usage_rate = (usage_hours / total_hours * 100)
+        
+        # 该设备的校外收入
+        dev_rev = device_bookings.filter(applicant__user_type='external').aggregate(
+            total=Sum('device__price_external')
+        )['total'] or Decimal('0')
         
         device_usage.append({
             'device_code': device.device_code,
@@ -155,9 +172,7 @@ def generate_report_data(report_type, start_date, end_date):
             'booking_count': booking_count,
             'usage_hours': usage_hours,
             'usage_rate': round(usage_rate, 2),
-            'revenue': float(device_bookings.filter(applicant__user_type='external').aggregate(
-                total=Sum('device__price_external')
-            )['total'] or Decimal('0'))
+            'revenue': float(dev_rev) 
         })
     
     # 构建报表数据
@@ -171,7 +186,7 @@ def generate_report_data(report_type, start_date, end_date):
             'total_users': UserInfo.objects.filter(booking__in=approved_bookings).distinct().count(),
             'total_revenue': float(total_revenue),
         },
-        'device_stats': list(device_stats),
+        'device_stats': device_stats, # 使用转换后的列表
         'user_type_stats': list(user_type_stats),
         'date_stats': list(date_stats),
         'device_usage': device_usage,
@@ -179,6 +194,7 @@ def generate_report_data(report_type, start_date, end_date):
     
     return report_data
 
+@login_required
 @login_required
 def report_stat(request):
     """报表统计页面 - 仅允许管理员访问"""
@@ -238,12 +254,10 @@ def report_stat(request):
                 end_date = start_date + timedelta(days=6)
                 report_name = f"{start_date.strftime('%Y年%m月%d日')} 至 {end_date.strftime('%Y年%m月%d日')} 周报表"
             elif report_type == 'month':
-                # 月报表：输入日期所在月的第一天和最后一天
-                # 处理 YYYY-MM 格式
+                # 月报表：处理 YYYY-MM 格式
                 if len(date_input) == 7 and date_input.count('-') == 1:
                     year, month = map(int, date_input.split('-'))
                 else:
-                    # 尝试解析为日期
                     input_date = datetime.strptime(date_input, '%Y-%m-%d').date()
                     year, month = input_date.year, input_date.month
                 start_date = date(year, month, 1)
@@ -253,27 +267,22 @@ def report_stat(request):
                     end_date = date(year, month + 1, 1) - timedelta(days=1)
                 report_name = f"{year}年{month:02d}月报表"
             elif report_type == 'year':
-                # 年报表：输入日期所在年的1月1日和12月31日
                 year = int(date_input)
                 start_date = date(year, 1, 1)
                 end_date = date(year, 12, 31)
                 report_name = f"{year}年报表"
             elif report_type == 'custom':
-                # 自定义时间段报表：使用用户指定的起始日期和结束日期
                 start_date = datetime.strptime(start_date_input, '%Y-%m-%d').date()
                 end_date = datetime.strptime(end_date_input, '%Y-%m-%d').date()
-                
-                # 验证日期范围
                 if start_date > end_date:
                     messages.error(request, '起始日期不能晚于结束日期！')
                     return redirect('report_stat')
-                
                 report_name = f"{start_date.strftime('%Y年%m月%d日')} 至 {end_date.strftime('%Y年%m月%d日')} 自定义报表"
             else:
                 messages.error(request, '无效的报表类型！')
                 return redirect('report_stat')
             
-            # 检查是否已存在相同报表（只检查相同类型的，自定义报表可以重复生成）
+            # 【修复点 1】：改用绝对路径重定向，解决 Reverse 报错
             if report_type != 'custom':
                 existing_report = Report.objects.filter(
                     report_type=report_type,
@@ -286,12 +295,12 @@ def report_stat(request):
                         messages.info(request, f'该时间段报表已存在（手动生成），已为您加载：{existing_report.report_name}')
                     else:
                         messages.info(request, f'该时间段报表已存在（系统自动生成），已为您加载：{existing_report.report_name}')
-                    return redirect(f'report_stat?view={existing_report.id}')
+                    return redirect(f'/labadmin/report/?view={existing_report.id}')
             
             # 生成报表数据
             report_data = generate_report_data(report_type, start_date, end_date)
             
-            # 创建报表记录
+            # 创建报表记录 (此处的崩溃取决于 generate_report_data 是否已将 Decimal 转为 float)
             report = Report.objects.create(
                 report_type=report_type,
                 report_name=report_name,
@@ -306,7 +315,8 @@ def report_stat(request):
             )
             
             messages.success(request, f'报表生成成功：{report_name}')
-            return redirect(f'report_stat?view={report.id}')
+            # 【修复点 2】：改用绝对路径重定向，解决 Reverse 报错
+            return redirect(f'/labadmin/report/?view={report.id}')
             
         except ValueError as e:
             messages.error(request, f'日期格式错误：请检查日期格式是否正确！')
